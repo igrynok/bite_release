@@ -47,9 +47,10 @@ class StanExtGC(data.Dataset):
     # Suggested joints to use for keypoint reprojection error calculations 
     ACC_JOINTS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16]      
 
-    def __init__(self, image_path=None, is_train=True, inp_res=256, out_res=64, sigma=1,
+    def __init__(self, opts, image_path=None, is_train=True, inp_res=256, out_res=64, sigma=1,
                  scale_factor=0.25, rot_factor=30, label_type='Gaussian', 
                  do_augment='default', shorten_dataset_to=None, dataset_mode='keyp_only', V12=None, val_opt='test', add_nonflat=False):
+        self.opts = opts
         self.V12 = V12
         self.is_train = is_train    # training set or test set
         if do_augment == 'yes':
@@ -146,6 +147,49 @@ class StanExtGC(data.Dataset):
         self.test_name_list = test_name_list_gc
         self.train_name_list = train_name_list_gc
 
+        # --- BEGIN DINOv2 FEATURE LOADING ---
+        self.load_dinov2_features = getattr(opts, 'use_dinov2_features', False)
+        self.dinov2_feature_dim = getattr(opts, 'dinov2_feature_dim', 128)  # Default to 128 for PCA features
+
+        if self.load_dinov2_features:
+            features_file_path = getattr(opts, 'dinov2_features_path', None)
+            if features_file_path and os.path.exists(features_file_path):
+                print(f"Loading DINOv2 PCA features from: {features_file_path}")
+                try:
+                    # Ensure weights_only=False as the .pt file contains a dictionary with Python lists
+                    loaded_dino_data = torch.load(features_file_path, map_location='cpu', weights_only=False)
+
+                    self.dino_pca_transformed_patches_all = loaded_dino_data['pca_transformed_patches']
+                    self.dino_original_image_paths = loaded_dino_data['original_image_paths']
+                    self.dino_num_patches_per_image = loaded_dino_data['num_patches_per_image']
+
+                    # Create a mapping from image names (e.g., 'n02.../n02...jpg') to DINOv2 feature indices
+                    self.dino_feature_idx_map = {
+                        path_suffix: idx
+                        for idx, path_suffix in enumerate(self.dino_original_image_paths)
+                    }
+                    print(f"Loaded DINOv2 PCA features for {len(self.dino_original_image_paths)} images.")
+
+                    # Pre-calculate starting indices for slicing all_compressed_patches
+                    if self.dino_num_patches_per_image and len(
+                            self.dino_num_patches_per_image) > 0:  # Check if list is not empty
+                        self.dino_patch_start_indices = [0] + np.cumsum(self.dino_num_patches_per_image[:-1]).tolist()
+                    else:
+                        self.dino_patch_start_indices = []
+                        if self.dino_num_patches_per_image is not None:  # if it's an empty list
+                            print("Warning: DINOv2 num_patches_per_image list is empty.")
+                        else:  # if it's None
+                            print("Warning: DINOv2 num_patches_per_image is None.")
+
+
+                except Exception as e:
+                    print(f"ERROR: Could not load or process DINOv2 features from {features_file_path}: {e}")
+                    self.load_dinov2_features = False
+            else:
+                print(f"WARNING: DINOv2 features path ('{features_file_path}') not provided or file not found.")
+                self.load_dinov2_features = False
+        # --- END DINOv2 FEATURE LOADING ---
+
         # stanext breed dict (contains for each name a stanext specific index)
         breed_json_path = os.path.join(STANEXT_RELATED_DATA_ROOT_DIR, 'StanExt_breed_dict_v2.json')
         self.breed_dict = self.get_breed_dict(breed_json_path, create_new_breed_json=False) 
@@ -237,6 +281,35 @@ class StanExtGC(data.Dataset):
                 gc_isflat = 1
             data = self.test_dict[name]
         img_path = os.path.join(self.img_folder, data['img_path'])
+
+        # --- BEGIN DINOv2 FEATURE RETRIEVAL ---
+        dinov2_feature_vector = torch.zeros(self.dinov2_feature_dim)
+
+        if self.load_dinov2_features:
+            dino_idx = self.dino_feature_idx_map.get(name)
+
+            if dino_idx is not None:
+                # Ensure dino_patch_start_indices and dino_num_patches_per_image are accessible and valid for dino_idx
+                if hasattr(self, 'dino_patch_start_indices') and hasattr(self, 'dino_num_patches_per_image') and \
+                        dino_idx < len(self.dino_patch_start_indices) and dino_idx < len(self.dino_num_patches_per_image):
+                    start_idx = self.dino_patch_start_indices[dino_idx]
+                    num_p = self.dino_num_patches_per_image[dino_idx]
+
+                    if num_p > 0:
+                        image_compressed_patches = self.dino_pca_transformed_patches_all[start_idx: start_idx + num_p]
+                        dinov2_feature_vector = torch.mean(image_compressed_patches, dim=0)
+                    else:
+                        if self.opts.verbose:  # Assuming an opts.verbose flag for detailed logging
+                            print(
+                                f"Verbose: Image {name} has 0 patches in DINOv2 data according to num_patches_per_image.")
+                else:
+                    if self.opts.verbose:
+                        print(
+                            f"Verbose: dino_idx {dino_idx} out of bounds for DINOv2 patch metadata lists for image {name}.")
+            else:
+                if self.opts.verbose:
+                    print(f"Verbose: DINOv2 features not found for image: {name} (dataset index {index})")
+        # --- END DINOv2 FEATURE RETRIEVAL ---
 
         # array of shape (n_verts_smal, 3) with [first: no-contact=0 contact=1     second: index of vertex     third: dist]
         n_verts_smal = 3889
@@ -391,10 +464,10 @@ class StanExtGC(data.Dataset):
         meta = {'index' : index, 'center' : c, 'scale' : s,
             'pts' : pts, 'tpts' : tpts, 'target_weight': target_weight, 
             'breed_index': this_breed['index'], 'sim_breed_index': sim_breed_index,
-            'ind_dataset': 0}   # ind_dataset=0 for stanext or stanexteasy or stanext 2
+            'ind_dataset': 0, 'dinov2_features': dinov2_feature_vector}   # ind_dataset=0 for stanext or stanexteasy or stanext 2
         meta2 = {'index' : index, 'center' : c, 'scale' : s,
             'pts' : pts, 'tpts' : tpts, 'target_weight': target_weight, 
-           'ind_dataset': 3} 
+           'ind_dataset': 3, 'dinov2_features': dinov2_feature_vector}
 
         # return different things depending on dataset_mode
         if self.dataset_mode=='keyp_only':

@@ -29,3 +29,8 @@ data:
   DATASET: 'stanext24_withgc_csaddnonflatmorestanding'  #  'stanext24_withgc_csaddnonflat'  # 'stanext24_withgc_cs0'
   SHORTEN_VAL_DATASET_TO: 600  # this is faster as we do not evaluate on the whole validation set  
   VAL_OPT: 'val'
+
+dinov2:
+  USE_DINOV2_FEATURES: True  # Set to True to enable, False to disable
+  DINOV2_FEATURES_PATH: "/content/dino_features_stanford_dogs_FULL_PATCH_PCA128/all_stanford_dogs_dinov2_FULL_patch_features_pca128.pt" # Your actual path
+  DINOV2_FEATURE_DIM: 128 # Dimension of PCA-compressed DINOv2 features

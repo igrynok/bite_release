@@ -68,7 +68,10 @@ class MyConv1d(nn.Module):
 
 
 class ModelShapeAndBreed(nn.Module):
-    def __init__(self, smal_model_type, n_betas=10, n_betas_limbs=13, n_breeds=121, n_z=512, structure_z_to_betas='default'):
+    def __init__(self, smal_model_type, n_betas=10, n_betas_limbs=13, n_breeds=121, n_z=512,
+                 structure_z_to_betas='default',
+                 use_dinov2_features=False,  # New parameter
+                 dinov2_feature_dim=128):  # New parameter
         super(ModelShapeAndBreed, self).__init__()
         self.n_betas = n_betas
         self.n_betas_limbs = n_betas_limbs   # n_betas_logscale
@@ -78,13 +81,36 @@ class ModelShapeAndBreed(nn.Module):
             if not (n_z == self.n_betas+self.n_betas_limbs):
                 raise ValueError
         self.smal_model_type = smal_model_type
+
+        # --- DINOv2 Integration Setup ---
+        self.use_dinov2_features = use_dinov2_features
+        self.dinov2_feature_dim = dinov2_feature_dim
+
         # shape branch
         self.resnet = models.resnet34(pretrained=False)  
         # replace the first layer
         n_in = 3 + 1
         self.resnet.conv1 = nn.Conv2d(n_in, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
-        # replace the last layer
-        self.resnet.fc = nn.Linear(512, n_z) 
+
+        resnet_feature_dim = self.resnet.fc.in_features  # Should be 512 for ResNet34
+        self.original_resnet_fc = self.resnet.fc  # Store original fc
+        self.resnet.fc = nn.Identity()  # Remove original fc to get features before it
+
+        if self.use_dinov2_features:
+            # MLP to process DINOv2 features
+            self.dino_mlp = nn.Sequential(
+                nn.Linear(self.dinov2_feature_dim, 256),
+                nn.ReLU(inplace=True),
+                nn.Linear(256, 256)  # Output dimension for processed DINOv2 features
+            )
+            dino_processed_dim = 256
+            # New combined FC layer
+            self.combined_fc = nn.Linear(resnet_feature_dim + dino_processed_dim, n_z)
+        else:
+            # If not using DINOv2, the original_resnet_fc will be used directly on resnet_backbone output
+            # Or, we can define self.combined_fc to be the original one for a unified path
+            self.combined_fc = self.original_resnet_fc  # This will map from resnet_feature_dim to n_z
+
         # softmax
         self.soft_max = torch.nn.Softmax(dim=1)
         # fc network (and other versions) to connect z with betas
@@ -148,14 +174,23 @@ class ModelShapeAndBreed(nn.Module):
             self.betas_mean_np = res['cluster_means'][0, :]
 
                                         
-    def forward(self, img, seg_raw=None, seg_prep=None):
+    def forward(self, img, dinov2_features=None, seg_raw=None, seg_prep=None):
         # img is the network input image 
         # seg_raw is before softmax and subtracting 0.5
         # seg_prep would be the prepared_segmentation
         if seg_prep is None:
             seg_prep = self.soft_max(seg_raw)[:, 1:2, :, :] - 0.5       
         input_img_and_seg = torch.cat((img, seg_prep), axis=1)
-        res_output = self.resnet(input_img_and_seg)
+        res_output = self.resnet(input_img_and_seg) # Shape: (batch_size, 512)
+
+        if self.use_dinov2_features and dinov2_features is not None:
+            processed_dino_feats = self.dino_mlp(dinov2_features)  # Shape: (batch_size, 256)
+            combined_features = torch.cat((res_output, processed_dino_feats), dim=1)
+            res_output = self.combined_fc(combined_features)  # To n_z
+        else:
+            # Use original ResNet FC layer if DINOv2 features are not used or not provided
+            res_output = self.original_resnet_fc(res_output)  # To n_z
+
         dog_breed_output = self.linear_breeds(res_output) 
         if self.structure_z_to_betas == 'inn':
             shape_output_orig, shape_limbs_output_orig = self.linear_betas_and_betas_limbs(res_output)
@@ -451,8 +486,9 @@ class ModelImageToBreed(nn.Module):
         return small_output, None, small_output_reproj
 
 class ModelImageTo3d_withshape_withproj(nn.Module):
-    def __init__(self, smal_model_type, smal_keyp_conf=None, arch='hg8', num_stage_comb=2, num_stage_heads=1, num_stage_heads_pose=1, trans_sep=False, n_joints=35, n_classes=20, n_partseg=15, n_keyp=20, n_bones=24, n_betas=10, n_betas_limbs=6, n_breeds=121, image_size=256, n_z=512, n_segbps=64*2, thr_keyp_sc=None, add_z_to_3d_input=True, add_segbps_to_3d_input=False, add_partseg=True, silh_no_tail=True, fix_flength=False, render_partseg=False, structure_z_to_betas='default', structure_pose_net='default', nf_version=None, ref_net_type='add', ref_detach_shape=True, graphcnn_type='inexistent', isflat_type='inexistent', shaperef_type='inexistent'):
+    def __init__(self, opts, smal_model_type, smal_keyp_conf=None, arch='hg8', num_stage_comb=2, num_stage_heads=1, num_stage_heads_pose=1, trans_sep=False, n_joints=35, n_classes=20, n_partseg=15, n_keyp=20, n_bones=24, n_betas=10, n_betas_limbs=6, n_breeds=121, image_size=256, n_z=512, n_segbps=64*2, thr_keyp_sc=None, add_z_to_3d_input=True, add_segbps_to_3d_input=False, add_partseg=True, silh_no_tail=True, fix_flength=False, render_partseg=False, structure_z_to_betas='default', structure_pose_net='default', nf_version=None, ref_net_type='add', ref_detach_shape=True, graphcnn_type='inexistent', isflat_type='inexistent', shaperef_type='inexistent'):
         super(ModelImageTo3d_withshape_withproj, self).__init__()
+        self.opts = opts  # Store opts
         self.n_classes = n_classes
         self.n_partseg = n_partseg
         self.n_betas = n_betas
@@ -507,6 +543,22 @@ class ModelImageTo3d_withshape_withproj(nn.Module):
             self.stacked_hourglass = hg8(pretrained=False, num_classes=self.n_classes, num_partseg=self.n_partseg, upsample_seg=self.upsample_seg, add_partseg=self.add_partseg)
         else:
             raise Exception('unrecognised model architecture: ' + arch)
+
+        # --- MODIFIED: Pass DINOv2 related opts to ModelShapeAndBreed ---
+        self.use_dinov2_features = getattr(opts, 'use_dinov2_features', False)
+        self.dinov2_feature_dim = getattr(opts, 'dinov2_feature_dim', 128)  # Get from opts
+
+        self.breed_model = ModelShapeAndBreed(
+            smal_model_type=self.smal_model_type,
+            n_betas=self.n_betas,
+            n_betas_limbs=self.n_betas_limbs,
+            n_breeds=self.n_breeds,
+            n_z=self.n_z,
+            structure_z_to_betas=self.structure_z_to_betas,
+            use_dinov2_features=self.use_dinov2_features,  # Pass flag
+            dinov2_feature_dim=self.dinov2_feature_dim  # Pass dim
+        )
+        # --- END MODIFICATION ---
         # ------------------------------ SHAPE AND BREED MODEL ------------------------------
         self.breed_model = ModelShapeAndBreed(self.smal_model_type, n_betas=self.n_betas, n_betas_limbs=self.n_betas_limbs, n_breeds=self.n_breeds, n_z=self.n_z, structure_z_to_betas=self.structure_z_to_betas)
         # ------------------------------ LINEAR 3D MODEL ------------------------------
@@ -535,7 +587,7 @@ class ModelImageTo3d_withshape_withproj(nn.Module):
         self.refinement_model = ModelRefinement(n_betas=self.n_betas, n_betas_limbs=self.n_betas_limbs, n_breeds=self.n_breeds, n_keyp=self.n_keyp, n_joints=self.n_joints, ref_net_type=self.ref_net_type, graphcnn_type=self.graphcnn_type, isflat_type=self.isflat_type, shaperef_type=self.shaperef_type)
 
 
-    def forward(self, input_img, norm_dict=None, bone_lengths_prepared=None, betas=None):
+    def forward(self, input_img, dinov2_features=None, norm_dict=None, bone_lengths_prepared=None, betas=None):
         batch_size = input_img.shape[0]
         device = input_img.device
         # ------------------------------ STACKED HOUR GLASS ------------------------------
@@ -561,6 +613,12 @@ class ModelImageTo3d_withshape_withproj(nn.Module):
         # breed_model takes as input the image as well as the predicted segmentation map 
         #     -> we need to split up ModelImageTo3d, such that we can use the silhouette
         resnet_output = self.breed_model(img=input_img, seg_raw=last_seg)
+        # MODIFIED: Pass dinov2_features to breed_model
+        resnet_output = self.breed_model(
+            img=input_img,
+            dinov2_features=dinov2_features,  # Pass DINOv2 features here
+            seg_raw=last_seg
+        )
         pred_breed = resnet_output['breeds']       # (bs, n_breeds)
         pred_z = resnet_output['z']
         # - prepare shape

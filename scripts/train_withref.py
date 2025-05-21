@@ -140,6 +140,7 @@ def main(args):
     else:
         render_partseg = False
     model = ModelImageTo3d_withshape_withproj(
+        opts=cfg, # Pass the full config object
         smal_model_type=cfg.smal.SMAL_MODEL_TYPE, smal_keyp_conf=cfg.smal.SMAL_KEYP_CONF, \
         num_stage_comb=cfg.params.NUM_STAGE_COMB, num_stage_heads=cfg.params.NUM_STAGE_HEADS, \
         num_stage_heads_pose=cfg.params.NUM_STAGE_HEADS_POSE, trans_sep=cfg.params.TRANS_SEP, \
@@ -301,7 +302,7 @@ def main(args):
             more_standing = True
             pl.print('use CustomGCSampler (with 12 flat and with 2 nonflat images, more standing poses)')
             assert cfg.optim.BATCH_SIZE == 14
-        train_dataset = StanExt(image_path=None, is_train=True, dataset_mode=dataset_mode, V12=cfg.data.V12, val_opt=cfg.data.VAL_OPT, add_nonflat=add_nonflat)
+        train_dataset = StanExt(opts=cfg, image_path=None, is_train=True, dataset_mode=dataset_mode, V12=cfg.data.V12, val_opt=cfg.data.VAL_OPT, add_nonflat=add_nonflat)
         data_sampler_info_gc = train_dataset.get_data_sampler_info_gc()
         batch_sampler = CustomGCSampler
         train_custom_batch_sampler = batch_sampler(data_sampler_info_gc=data_sampler_info_gc, batch_size=cfg.optim.BATCH_SIZE, add_nonflat=add_nonflat, more_standing=more_standing)        
@@ -309,7 +310,7 @@ def main(args):
             train_dataset,
             batch_sampler=train_custom_batch_sampler,
             num_workers=args.workers, pin_memory=True)
-        val_dataset = StanExt(image_path=None, is_train=False, dataset_mode=dataset_mode, V12=cfg.data.V12, val_opt=cfg.data.VAL_OPT)
+        val_dataset = StanExt(opts=cfg, image_path=None, is_train=False, dataset_mode=dataset_mode, V12=cfg.data.V12, val_opt=cfg.data.VAL_OPT)
         val_loader = DataLoader(
             val_dataset,
             batch_size=cfg.optim.BATCH_SIZE, shuffle=False,

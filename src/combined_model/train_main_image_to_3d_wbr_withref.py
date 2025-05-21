@@ -62,9 +62,12 @@ def do_training_epoch(train_loader, model, loss_module, loss_module_ref, device,
     # prepare variables, put them on the right device
     for i, (input, target_dict) in iterable:
         batch_size = input.shape[0]
+        dinov2_features = None
         for key in target_dict.keys(): 
             if key == 'breed_index':
-                target_dict[key] = target_dict[key].long().to(device)
+                target_dict[key] = target_dict[key].long().to(device),
+            elif key == 'dinov2_features':  # Handle DINOv2 features
+                dinov2_features = target_dict[key].float().to(device)
             elif key in ['index', 'pts', 'tpts', 'target_weight', 'silh', 'silh_distmat_tofg', 'silh_distmat_tobg', 'sim_breed_index', 'img_border_mask']:
                 target_dict[key] = target_dict[key].float().to(device)
             elif key in ['has_seg', 'gc']:
@@ -77,7 +80,10 @@ def do_training_epoch(train_loader, model, loss_module, loss_module_ref, device,
         assert model.training, 'model must be in training mode.'
         with torch.enable_grad():
             # ----- forward pass -----  
-            output, output_unnorm, output_reproj, output_ref, output_ref_comp = model(input, norm_dict=norm_dict)        
+            output, output_unnorm, output_reproj, output_ref, output_ref_comp = model(
+                input,
+                dinov2_features=dinov2_features,
+                norm_dict=norm_dict)
             # ----- loss -----
             # --- from main network
             loss, loss_dict = loss_module(output_reproj=output_reproj, 
@@ -204,9 +210,12 @@ def do_validation_epoch(val_loader, model, loss_module, loss_module_ref, device,
 
         # prepare variables, put them on the right device
         curr_batch_size = input.shape[0]
+        dinov2_features = None  # Initialize
         for key in target_dict.keys(): 
             if key == 'breed_index':
                 target_dict[key] = target_dict[key].long().to(device)
+            elif key == 'dinov2_features':  # Handle DINOv2 features
+                dinov2_features = target_dict[key].float().to(device)
             elif key in ['index', 'pts', 'tpts', 'target_weight', 'silh', 'silh_distmat_tofg', 'silh_distmat_tobg', 'sim_breed_index', 'img_border_mask']:
                 target_dict[key] = target_dict[key].float().to(device)
             elif key in ['has_seg', 'gc']:
@@ -222,7 +231,10 @@ def do_validation_epoch(val_loader, model, loss_module, loss_module_ref, device,
             # output_unnorm: (['pose_rotmat', 'flength', 'trans', 'keypoints'])
             # output_reproj: (['vertices_smal', 'torch_meshes', 'keyp_3d', 'keyp_2d', 'silh', 'betas', 'pose_rot6d', 'dog_breed', 'shapedirs', 'z', 'flength_unnorm', 'flength'])
             # target_dict: (['index', 'center', 'scale', 'pts', 'tpts', 'target_weight', 'breed_index', 'sim_breed_index', 'ind_dataset', 'silh'])
-            output, output_unnorm, output_reproj, output_ref, output_ref_comp = model(input, norm_dict=norm_dict)        
+            output, output_unnorm, output_reproj, output_ref, output_ref_comp = model(
+                input,
+                dinov2_features=dinov2_features,
+                norm_dict=norm_dict)
             # ----- loss -----
             if metrics == 'no_loss':
                 # --- from main network
@@ -487,12 +499,23 @@ def do_visual_epoch(val_loader, model, device, data_info, flip=False, quiet=Fals
     my_step = 0
     for index, (input, target_dict) in iterable:
         batch_size = input.shape[0]
+        dinov2_features = None
+        # Transfer target_dict items to device, including dinov2_features
+        for key in target_dict.keys():
+            if key == 'dinov2_features':
+                dinov2_features = target_dict[key].float().to(device)
+            elif isinstance(target_dict[key], torch.Tensor):  # General tensor handling
+                target_dict[key] = target_dict[key].to(device)
+
         input = input.float().to(device)
         partial_results = {}
 
         # ----------------------- do visualization step -----------------------
         with torch.no_grad():
-            output, output_unnorm, output_reproj, output_ref, output_ref_comp = model(input, norm_dict=norm_dict)        
+            output, output_unnorm, output_reproj, output_ref, output_ref_comp = model(
+                input,
+                dinov2_features=dinov2_features,
+                norm_dict=norm_dict)
 
         sm = torch.nn.Softmax(dim=2)
         ground_contact_probs = sm(output_ref['vertexwise_ground_contact'])
