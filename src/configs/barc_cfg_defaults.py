@@ -73,6 +73,13 @@ _C.data.SHORTEN_VAL_DATASET_TO = None
 _C.data.VAL_OPT = 'val'
 _C.data.VAL_METRICS = 'no_loss'
 
+# ############################################### #
+_C.dinov2 = CN()
+_C.dinov2.USE_DINOV2_FEATURES = False
+_C.dinov2.DINOV2_FEATURES_PATH = ""
+_C.dinov2.DINOV2_FEATURE_DIM = 0
+# ############################################### #
+
 # ---------------------------------------
 def update_dependent_vars(cfg):    
     cfg.params.N_CLASSES = cfg.params.N_KEYP + cfg.params.N_SEG
